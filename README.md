@@ -1,106 +1,194 @@
-# *SparseLLM*: Towards Global Pruning of LLMs
+<div align="center">
 
-This repository contains the code for our **NeurIPS 2024** paper "[*SparseLLM*: Towards Global Pruning for Pre-trained Language Models](https://arxiv.org/abs/2402.17946)".
+# StructPrune
 
-*WORKING IN PROGRESS*: Our current released code is for preview purposes only and may be subject to numerical instability issues. We are actively working on a more stable version of our method, with an estimated release date around the time our camera-ready paper is out. 
+### Structured Global Pruning Asymptotics with `O(sqrt(N))` GPU Memory
 
-## Updates
+Official implementation for the arXiv paper:
 
-- <span style="color:green;">&#x2705;</span> *SparseLLM* code for both **OPT** and **LLaMA** models is now available.
-- <span style="color:green;">&#x2705;</span> More model types and functionalities will be added soon.
+**StructPrune: Structured Global Pruning asymptotics with `O(sqrt(N))` GPU Memory**
 
+<p>
+  <a href="https://arxiv.org/abs/2510.03246"><img alt="arXiv" src="https://img.shields.io/badge/arXiv-2510.03246-b31b1b.svg"></a>
+  <a href="https://arxiv.org/pdf/2510.03246"><img alt="Paper PDF" src="https://img.shields.io/badge/Paper-PDF-1f6feb.svg"></a>
+  <a href="#quickstart"><img alt="Quickstart" src="https://img.shields.io/badge/Quickstart-OPT%20%7C%20LLaMA-2ea44f.svg"></a>
+  <a href="#citation"><img alt="Citation" src="https://img.shields.io/badge/Cite-BibTeX-8a63d2.svg"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-34d058.svg"></a>
+</p>
 
-## Dependencies
+<p>
+  <a href="#overview">Overview</a> |
+  <a href="#installation">Installation</a> |
+  <a href="#quickstart">Quickstart</a> |
+  <a href="#usage">Usage</a> |
+  <a href="#citation">Citation</a>
+</p>
 
-This project requires the following core dependencies:
+</div>
 
-- `Python`: tested on v3.10.14
-- `PyTorch`: tested on v2.4.1 with CUDA 12.2 
-- `Transformers`: tested on v4.45.1
-- `Datasets`: tested on v3.0.1
-- `numpy`: tested on v2.1.1
-- `pandas`: tested on v2.2.3
-- `huggingface_hub`: tested on v0.25.1
-- `wandb`: tested on v0.18.2 (for experiment tracking)
+## Overview
+
+StructPrune studies a practical bottleneck in large language model pruning:
+global structured pruning can preserve model quality better than purely local
+layer-wise pruning, but naively solving the global problem requires memory that
+scales with the full model. StructPrune reformulates the pruning objective with
+a divide-and-conquer ADMM procedure, coordinates structured masks across
+modules, and targets global pruning behavior with `O(sqrt(N))` GPU memory.
+
+This repository provides pruning and evaluation entry points for OPT and LLaMA
+families. It builds on the SparseGPT/SparseLLM style one-shot calibration
+pipeline while adding structured pruning utilities, iterative correction, and
+global alternating updates for MLP blocks.
+
+## Method at a Glance
+
+| Component | Role in the codebase |
+| --- | --- |
+| Calibration data | `datautils.py` samples WikiText2, PTB, or C4 segments |
+| Model entry points | `opt_main.py` and `llama_main.py` load, prune, evaluate, and optionally save models |
+| Global pruning loop | `model_utils.py` coordinates layer-wise capture, structured updates, and evaluation |
+| Structured mask utilities | `pruning_utils.py` implements structured row/column masks, iterative correction, and SparseGPT-style pruning |
+| Quantization helpers | `quant.py` provides optional low-bit quantization utilities |
+
+## Installation
+
+Create an environment and install the core dependencies:
+
+```bash
+git clone git@github.com:Hik289/structured_sparseGPT.git
+cd structured_sparseGPT
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install torch transformers datasets numpy pandas huggingface_hub wandb
+```
+
+The original experiments use GPU execution. Install the PyTorch build that
+matches your CUDA version from the official PyTorch instructions if the generic
+`pip install torch` command does not match your machine.
+
+## Quickstart
+
+Prune and evaluate a small OPT model:
+
+```bash
+python opt_main.py \
+  --model facebook/opt-125m \
+  --dataset c4 \
+  --nsamples 128 \
+  --sparsity 0.7 \
+  --cudan cuda:0
+```
+
+Run LLaMA-style pruning:
+
+```bash
+python llama_main.py \
+  --model meta-llama/Llama-2-7b-hf \
+  --dataset c4 \
+  --nsamples 32 \
+  --sparsity 0.5 \
+  --cudan cuda:0
+```
+
+Run semi-structured `N:M` pruning:
+
+```bash
+python opt_main.py \
+  --model facebook/opt-125m \
+  --dataset c4 \
+  --prunen 2 \
+  --prunem 4 \
+  --cudan cuda:0
+```
 
 ## Usage
 
-The scripts directory contains all the bash commands to replicate the main results in our NeurIPS 2024 paper. 
+### Main Arguments
 
-### Example for Pruning OPT:
+| Argument | Description |
+| --- | --- |
+| `--model` | Hugging Face model identifier or local model path |
+| `--dataset` | Calibration dataset: `wikitext2`, `ptb`, or `c4` |
+| `--nsamples` | Number of calibration samples |
+| `--sparsity` | Target sparsity ratio for pruning |
+| `--prunen`, `--prunem` | Semi-structured `N:M` pruning pattern |
+| `--percdamp` | Hessian dampening coefficient |
+| `--blocksize` | Block size for adaptive mask selection |
+| `--minlayer`, `--maxlayer` | Layer range to prune |
+| `--prune_only` | Restrict pruning to layer names containing this string |
+| `--invert` | Invert the layer-selection rule |
+| `--gmp` | Run the magnitude-pruning baseline |
+| `--wbits` | Optional quantization bit width |
+| `--save` | Save the pruned model to a local path |
+| `--cudan` | CUDA device string, e.g. `cuda:0` |
 
-Below is an example command for pruning the OPT-125M model using SparseLLM, to achieve 70% sparsity.
+### Saving a Pruned Model
 
-```
+```bash
 python opt_main.py \
-    --model facebook/opt-125m \
-    --dataset c4 \
-    --sparsity 0.7 \
+  --model facebook/opt-125m \
+  --dataset c4 \
+  --sparsity 0.7 \
+  --save checkpoints/opt125m_structprune \
+  --cudan cuda:0
 ```
 
-We provide a quick overview of the key arguments:
+### Layer-Restricted Pruning
 
-- `--model`: The identifier for the model on the Hugging Face model hub.
-- `--dataset`: The dataset to use for evaluation. We support datasets like `c4`, `wikitext2`, and `ptb`.
-- `--sparsity`: The desired sparsity level (percentage of weights to be pruned).
-
-**Remark:** OPT-350M is currently not supported by our method, due to potential numerical stability issue.
-
-### Example for Pruning LLaMA-2:
-
-For **LLaMA-2** models, use the llama_main.py file and specify the model path as `meta-llama/Llama-2-7b-hf`. Here is an example command for pruning LLaMA-2-7B:
-
-```
+```bash
 python llama_main.py \
-    --model meta-llama/Llama-2-7b-hf \
-    --dataset c4 \
-    --sparsity 0.7 \
+  --model meta-llama/Llama-2-7b-hf \
+  --dataset c4 \
+  --sparsity 0.5 \
+  --minlayer 4 \
+  --maxlayer 24 \
+  --prune_only mlp \
+  --cudan cuda:0
 ```
 
-### Available Sparsity Methods
+## Repository Layout
 
-We support the following pruning methods for both **OPT** and **LLaMA** models:
-
-- **Unstructured**: Pruning individual weights without any specific pattern.
-- **Semi-Structured N:M Sparsity**: For semi-structured pruning, use the following sparsity types:
-  - `--sparsity_type 2:4`: Prune 2 out of every 4 weights.
-  - `--sparsity_type 4:8`: Prune 4 out of every 8 weights.
-
-```
-python opt_main.py \
-    --model facebook/opt-125m \
-    --dataset c4 \
-    --prunen 2 \
-    --prunem 4 \
+```text
+opt_main.py        OPT pruning and evaluation entry point
+llama_main.py      LLaMA pruning and evaluation entry point
+model_utils.py     Model loading, activation capture, global pruning loops
+pruning_utils.py   Structured pruning, SparseGPT-style pruning, correction utilities
+datautils.py       Calibration/evaluation data loading
+quant.py           Quantization helpers
+run.ipynb          Exploratory notebook
+run2.ipynb         Exploratory notebook
+LICENSE            Apache-2.0 license
 ```
 
-Similarly, for **LLaMA-2-7B** semi-structured pruning:
+## Notes
 
-```
-python llama_main.py \
-    --model meta-llama/Llama-2-7b-hf \
-    --dataset c4 \
-    --prunen 2 \
-    --prunem 4 \
-```
+- The code downloads Hugging Face models and datasets as needed.
+- Large models require substantial GPU memory; reduce `--nsamples` when memory
+  is tight.
+- LLaMA checkpoints may require Hugging Face access approval and local login.
+- This implementation inherits ideas and utilities from
+  [SparseGPT](https://arxiv.org/abs/2301.00774),
+  [Wanda](https://arxiv.org/abs/2306.11695), and
+  [SparseLLM](https://arxiv.org/abs/2402.17946).
 
-## Reference
+## Citation
 
-If you find this code useful in your research, please consider citing:
+If you use this repository, please cite:
 
 ```bibtex
-@inproceedings{bai2024sparsellm,
-  title={SparseLLM: Towards Global Pruning of Pre-trained Language Models},
-  author={Bai, Guangji and Li, Yijiang and Ling, Chen and Kim, Kibaek and Zhao, Liang},
-  booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
-  year={2024}
+@misc{song2025structprunestructuredglobalpruning,
+  title         = {StructPrune: Structured Global Pruning asymptotics with $\mathcal{O}(\sqrt{N})$ GPU Memory},
+  author        = {Xinyuan Song and Guangji Bai and Liang Zhao},
+  year          = {2025},
+  eprint        = {2510.03246},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  url           = {https://arxiv.org/abs/2510.03246}
 }
 ```
-We sincerely appreciate it 😊
 
-## Disclaimer
+## License
 
-1. This repository is built upon [SparseGPT](https://arxiv.org/abs/2301.00774) and [Wanda](https://arxiv.org/abs/2306.11695).
-2. *SparseLLM* aims to advance the research on improving fully local pruning methods for large language models (LLMs). Due to the iterative alternating optimization nature of *SparseLLM*, its running time will be (roughly number of iteration times) longer than that of one-shot pruning methods such as SparseGPT or Wanda. Additionally, the performance and numerical stability of the alternating optimization process can be sensitive to the initialization of hyperparameters.
-3. *SparseLLM* relies on auxiliary variables to achieve subproblem decomposition, which inevitably introduces additional memory overhead. For larger models like LLaMA-2-7B and beyond, we used a smaller calibration data size (e.g., 64 or 32) to ensure the code could run on an A100 40GB GPU. We are actively working on optimizing the GPU memory consumption and improving the efficiency of the code to support larger models and data sizes more effectively.
-
+This project is released under the Apache License 2.0. See [LICENSE](LICENSE).
