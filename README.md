@@ -9,11 +9,9 @@ Official implementation for the arXiv paper:
 **StructPrune: Structured Global Pruning asymptotics with `O(sqrt(N))` GPU Memory**
 
 <p>
-  <a href="https://arxiv.org/abs/2510.03246"><img alt="arXiv" src="https://img.shields.io/badge/arXiv-2510.03246-b31b1b.svg"></a>
-  <a href="https://arxiv.org/pdf/2510.03246"><img alt="Paper PDF" src="https://img.shields.io/badge/Paper-PDF-1f6feb.svg"></a>
-  <a href="#quickstart"><img alt="Quickstart" src="https://img.shields.io/badge/Quickstart-OPT%20%7C%20LLaMA-2ea44f.svg"></a>
-  <a href="#citation"><img alt="Citation" src="https://img.shields.io/badge/Cite-BibTeX-8a63d2.svg"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-34d058.svg"></a>
+  <a href="https://arxiv.org/abs/2510.03246"><img src="https://img.shields.io/badge/arXiv-2510.03246-b31b1b.svg" alt="arXiv"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-green.svg" alt="Apache 2.0 license"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg" alt="Python 3.10+"></a>
 </p>
 
 <p>
