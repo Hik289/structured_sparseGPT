@@ -17,12 +17,18 @@ Official implementation for the arXiv paper:
 <p>
   <a href="#overview">Overview</a> |
   <a href="#installation">Installation</a> |
-  <a href="#quickstart">Quickstart</a> |
+  <a href="#quick-start">Quick Start</a> |
   <a href="#usage">Usage</a> |
   <a href="#citation">Citation</a>
 </p>
 
 </div>
+
+## At a Glance
+
+- **Research question.** Can structured global pruning be made memory-efficient enough for large autoregressive models?
+- **Core idea.** StructPrune implements global structured pruning with asymptotic GPU memory scaling of O(sqrt(N)).
+- **What is included.** OPT and LLaMA entrypoints, calibration-dataset options, pruning arguments, saving workflows, and implementation notes.
 
 ## Overview
 
@@ -38,7 +44,7 @@ families. It builds on the SparseGPT/SparseLLM style one-shot calibration
 pipeline while adding structured pruning utilities, iterative correction, and
 global alternating updates for MLP blocks.
 
-## Method at a Glance
+## Method Overview
 
 | Component | Role in the codebase |
 | --- | --- |
@@ -66,7 +72,7 @@ The original experiments use GPU execution. Install the PyTorch build that
 matches your CUDA version from the official PyTorch instructions if the generic
 `pip install torch` command does not match your machine.
 
-## Quickstart
+## Quick Start
 
 Prune and evaluate a small OPT model:
 
@@ -146,7 +152,7 @@ python llama_main.py \
   --cudan cuda:0
 ```
 
-## Repository Layout
+## Repository Structure
 
 ```text
 opt_main.py        OPT pruning and evaluation entry point
