@@ -177,6 +177,10 @@ LICENSE            Apache-2.0 license
   [Wanda](https://arxiv.org/abs/2306.11695), and
   [SparseLLM](https://arxiv.org/abs/2402.17946).
 
+## Reviewer Guide
+
+For a reviewer-oriented map of smoke checks, paper-scale entry points, data boundaries, and reporting metadata, see [Artifact Guide](docs/ARTIFACT.md).
+
 ## Artifact Checklist
 
 - **Code release.** Core implementations, configuration files, and reproduction entry points are versioned in this repository.
