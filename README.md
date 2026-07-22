@@ -24,11 +24,11 @@ Official implementation for the arXiv paper:
 
 </div>
 
-## At a Glance
+## Repository Summary
 
-- **Research question.** Can structured global pruning be made memory-efficient enough for large autoregressive models?
-- **Core idea.** StructPrune implements global structured pruning with asymptotic GPU memory scaling of O(sqrt(N)).
-- **What is included.** OPT and LLaMA entrypoints, calibration-dataset options, pruning arguments, saving workflows, and implementation notes.
+- **Scope.** Can structured global pruning be made memory-efficient enough for large autoregressive models?
+- **Method.** StructPrune implements global structured pruning with asymptotic GPU memory scaling of O(sqrt(N)).
+- **Contents.** OPT and LLaMA entrypoints, calibration-dataset options, pruning arguments, saving workflows, and implementation notes.
 
 ## Overview
 
@@ -177,16 +177,16 @@ LICENSE            Apache-2.0 license
   [Wanda](https://arxiv.org/abs/2306.11695), and
   [SparseLLM](https://arxiv.org/abs/2402.17946).
 
-## Reviewer Guide
+## Artifact Notes
 
-For a reviewer-oriented map of smoke checks, paper-scale entry points, data boundaries, and reporting metadata, see [Artifact Guide](docs/ARTIFACT.md).
+Reproduction notes are in [docs/ARTIFACT.md](docs/ARTIFACT.md): environment files, smoke checks, data boundaries, and paper-scale entry points.
 
-## Artifact Checklist
+## Reproducibility Notes
 
-- **Code release.** Core implementations, configuration files, and reproduction entry points are versioned in this repository.
-- **Reproducibility.** Start with the smoke or quick-start path before paper-scale runs; record the commit hash, Python version, backend/model identifiers, seeds, and command-line arguments.
-- **Data and credentials.** Large datasets, benchmark downloads, generated outputs, and API keys are intentionally excluded. Use the data and configuration notes above to recreate them or point to local copies.
-- **Reporting.** For paper-scale runs, keep raw run folders immutable and regenerate tables or figures from the logged artifacts with the listed analysis scripts.
+- **Release.** Source code, configuration files, and runnable entry points are tracked here.
+- **Runs.** Start with the smoke or quick-start commands before full grids; record commit hash, Python version, model/backend identifiers, seeds, and command-line arguments.
+- **Data.** Large datasets, benchmark downloads, generated outputs, and API keys are not tracked. Use the data/configuration notes above to recreate or point to local copies.
+- **Reporting.** Keep raw run folders fixed for paper-scale runs and regenerate tables or figures from logged artifacts with the listed scripts.
 
 ## Citation
 
