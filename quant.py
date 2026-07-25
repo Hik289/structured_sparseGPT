@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -21,6 +20,12 @@ class Quantizer(nn.Module):
             mse=False, norm=2.4, grid=100, maxshrink=.8,
             grouprows=1
         ):
+        if not isinstance(bits, int) or bits < 1:
+            raise ValueError(f"bits must be a positive integer, got {bits!r}")
+        if not isinstance(grouprows, int) or grouprows < 1:
+            raise ValueError(
+                f"grouprows must be a positive integer, got {grouprows!r}"
+            )
         self.maxq = torch.tensor(2 ** bits - 1)
         self.perchannel = perchannel
         self.sym = sym

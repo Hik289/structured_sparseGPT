@@ -25,20 +25,28 @@ def main():
     parser.add_argument("--save", type=str, default="", help="Path to save model.")
     parser.add_argument("--true-sequential", action="store_true", help="Run in true sequential mode.")
     parser.add_argument("--log_wandb", action="store_true", help="Log to W&B.")
-    parser.add_argument("--cudan", type=str, default='cuda:0', help="cuda to use")
+    parser.add_argument(
+        "--device", "--cudan", dest="device", default="cuda:0",
+        help="PyTorch device; --cudan remains as a compatibility alias.",
+    )
 
     args = parser.parse_args()
+    if not 0 <= args.sparsity <= 1:
+        parser.error("--sparsity must be in [0, 1]")
+    if args.prunen and (not args.prunem or args.prunen > args.prunem):
+        parser.error("N:M pruning requires 0 < --prunen <= --prunem")
+    device = torch.device(args.device)
 
     model = get_llama(args)
     model.eval()
     dataloader, testloader = get_loaders(args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen)
 
     if (args.sparsity or args.prunen) and not args.gmp:
-        llama_sparsellm(model, dataloader, torch.device(args.cudan), args)
+        llama_sparsellm(model, dataloader, device, args)
 
     for dataset in ['wikitext2', 'c4']:
         dataloader, testloader = get_loaders(dataset, seed=args.seed, model=args.model, seqlen=model.seqlen)
-        llama_eval(model, testloader, torch.device(args.cudan), args, dataset)
+        llama_eval(model, testloader, device, args, dataset)
 
     if args.save:
         model.save_pretrained(args.save)

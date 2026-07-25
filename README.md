@@ -65,12 +65,19 @@ cd structured_sparseGPT
 python3 -m venv .venv
 source .venv/bin/activate
 
-pip install torch transformers datasets numpy pandas huggingface_hub wandb
+pip install -r requirements.txt
 ```
 
 The original experiments use GPU execution. Install the PyTorch build that
 matches your CUDA version from the official PyTorch instructions if the generic
 `pip install torch` command does not match your machine.
+
+Run the offline regression tests before a paper-scale job:
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q .
+```
 
 ## Quick Start
 
@@ -82,7 +89,7 @@ python opt_main.py \
   --dataset c4 \
   --nsamples 128 \
   --sparsity 0.7 \
-  --cudan cuda:0
+  --device cuda:0
 ```
 
 Run LLaMA-style pruning:
@@ -93,7 +100,7 @@ python llama_main.py \
   --dataset c4 \
   --nsamples 32 \
   --sparsity 0.5 \
-  --cudan cuda:0
+  --device cuda:0
 ```
 
 Run semi-structured `N:M` pruning:
@@ -104,7 +111,7 @@ python opt_main.py \
   --dataset c4 \
   --prunen 2 \
   --prunem 4 \
-  --cudan cuda:0
+  --device cuda:0
 ```
 
 ## Usage
@@ -126,7 +133,7 @@ python opt_main.py \
 | `--gmp` | Run the magnitude-pruning baseline |
 | `--wbits` | Optional quantization bit width |
 | `--save` | Save the pruned model to a local path |
-| `--cudan` | CUDA device string, e.g. `cuda:0` |
+| `--device` | PyTorch device string, e.g. `cuda:0` (`--cudan` is retained as a compatibility alias) |
 
 ### Saving a Pruned Model
 
@@ -136,7 +143,7 @@ python opt_main.py \
   --dataset c4 \
   --sparsity 0.7 \
   --save checkpoints/opt125m_structprune \
-  --cudan cuda:0
+  --device cuda:0
 ```
 
 ### Layer-Restricted Pruning
@@ -149,7 +156,7 @@ python llama_main.py \
   --minlayer 4 \
   --maxlayer 24 \
   --prune_only mlp \
-  --cudan cuda:0
+  --device cuda:0
 ```
 
 ## Repository Structure

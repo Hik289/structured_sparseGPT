@@ -1,4 +1,4 @@
-# DISCLAIMER: This file is a modified version of the original SparseGPT data loader. The original SparseGPT data loader can be found in [SparseGPT: Massive Language Models Can Be Accurately Pruned in One-Shot].
+"""Calibration loaders adapted from the original SparseGPT artifact."""
 
 import random
 
@@ -9,6 +9,7 @@ from transformers import AutoTokenizer, LlamaTokenizer
 
 
 def set_seed(seed):
+    random.seed(seed)
     np.random.seed(seed)
     torch.random.manual_seed(seed)
 
@@ -97,6 +98,10 @@ def get_c4(nsamples, seed, seqlen, model, tokenizer):
     return trainloader, valenc
 
 def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model=''):
+    if nsamples < 0:
+        raise ValueError("nsamples must be non-negative")
+    if seqlen < 1:
+        raise ValueError("seqlen must be positive")
     tokenizer = get_tokenizer(model)
     if 'wikitext2' in name:
         return get_wikitext2(nsamples, seed, seqlen, model, tokenizer)
@@ -104,3 +109,6 @@ def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model=''):
         return get_ptb(nsamples, seed, seqlen, model, tokenizer)
     if 'c4' in name:
         return get_c4(nsamples, seed, seqlen, model, tokenizer)
+    raise ValueError(
+        f"unknown dataset {name!r}; expected wikitext2, ptb, or c4"
+    )

@@ -1,5 +1,9 @@
-# This file will contain helper functions related to the pruning process, including any specialized pruning functions and the SparseGPT functionality.
-# DISCLAIMER: The SparseGPT class is a modified version of the original SparseGPT class. The original SparseGPT class can be found in [SparseGPT: Massive Language Models Can Be Accurately Pruned in One-Shot].
+"""Structured pruning utilities.
+
+The SparseGPT routines are adapted from the implementation accompanying
+"SparseGPT: Massive Language Models Can Be Accurately Pruned in One-Shot."
+StructPrune adds structured masks and iterative correction.
+"""
 
 import math
 import time
@@ -8,15 +12,14 @@ import torch
 import torch.nn as nn
 import transformers
 import torch.nn.functional as F
-from quant import *
-
-# turned this flag to be True
-DEBUG = True
+from quant import quantize
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
+
+def find_layers(module, layers=(nn.Conv2d, nn.Linear), name=""):
+    """Return supported leaf layers keyed by their dotted module names."""
     if type(module) in layers:
         return {name: module}
     res = {}
@@ -25,6 +28,29 @@ def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
             child, layers=layers, name=name + '.' + name1 if name != '' else name1
         ))
     return res
+
+
+def _validate_pruning_args(sparsity, prunen=0, prunem=0):
+    """Validate unstructured or N:M pruning parameters."""
+    if not 0 <= sparsity <= 1:
+        raise ValueError(f"sparsity must be in [0, 1], got {sparsity}")
+    if prunen < 0 or prunem < 0:
+        raise ValueError("prunen and prunem must be non-negative")
+    if prunen and (not prunem or prunen > prunem):
+        raise ValueError("N:M pruning requires 0 < N <= M")
+
+
+def _smallest_mask(scores, sparsity):
+    """Select exactly floor(sparsity * n) smallest scores."""
+    count = int(scores.numel() * sparsity)
+    mask = torch.zeros_like(scores, dtype=torch.bool)
+    if count:
+        indices = torch.topk(
+            scores.flatten(), count, largest=False, sorted=False,
+        ).indices
+        mask.view(-1)[indices] = True
+    return mask
+
 
 class SparseGPT_OPT:
 
@@ -45,17 +71,15 @@ class SparseGPT_OPT:
 
     def add_batch(self, inp, out, name, blocksize=1024):
         self.inp1 = inp
-        #print(self.inp1.shape)
         self.out1 = out
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
-        ###### added code
+        # Retain MLP activations used by the joint structured update.
         if name == 'fc1' or name == 'fc2':
             self.batch_inp.append(inp[0].clone().detach())
             if len(out.shape) == 3:
                 out = out.squeeze(0)
             self.batch_out.append(out.clone().detach())
-        ######
         tmp = inp.shape[0]
         if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
             if len(inp.shape) == 3:
@@ -69,6 +93,7 @@ class SparseGPT_OPT:
     def fasterprune(
         self, sparsity, prunen=0, prunem=0, blocksize=128, percdamp=.01
     ):
+        _validate_pruning_args(sparsity, prunen, prunem)
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
@@ -115,8 +140,7 @@ class SparseGPT_OPT:
                     mask1 = mask[:, i1:i2]
                 else:
                     tmp = W1 ** 2 / (torch.diag(Hinv1).reshape((1, -1))) ** 2
-                    thresh = torch.sort(tmp.flatten())[0][int(tmp.numel() * sparsity)]
-                    mask1 = tmp <= thresh
+                    mask1 = _smallest_mask(tmp, sparsity)
             else:
                 mask1 = torch.zeros_like(W1) == 1
 
@@ -126,7 +150,8 @@ class SparseGPT_OPT:
 
                 if prunen != 0 and i % prunem == 0:
                     tmp = W1[:, i:(i + prunem)] ** 2 / (torch.diag(Hinv1)[i:(i + prunem)].reshape((1, -1))) ** 2
-                    mask1.scatter_(1, i + torch.topk(tmp, prunen, dim=1, largest=False)[1], True)
+                    group_n = min(prunen, tmp.shape[1])
+                    mask1.scatter_(1, i + torch.topk(tmp, group_n, dim=1, largest=False)[1], True)
 
                 q = w.clone()
                 q[mask1[:, i]] = 0
@@ -148,21 +173,15 @@ class SparseGPT_OPT:
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-            # if DEBUG:
-            #     self.layer.weight.data[:, :i2] = W[:, :i2]
-            #     self.layer.weight.data[:, i2:] = W[:, i2:]
-            #     print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-            #     print(torch.sum(Losses))
 
-        torch.cuda.synchronize()
+        if self.dev.type == "cuda":
+            torch.cuda.synchronize(self.dev)
         print('time %.2f' % (time.time() - tick))
         print('error', torch.sum(Losses).item())
 
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
         self.layer.weight.data = W.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
-        # if DEBUG:
-            # print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
 
     def simple_structured_prune(self, sparsity, prunen=0, prunem=0, percdamp=128, blocksize=0.01,prune_rows=False, prune_cols=True):
@@ -417,12 +436,10 @@ class SparseGPT_OPT:
         # -------------------------------------------------------------------------
         # Expand input_activation_norms to broadcast: shape [1, num_cols].
         # This line effectively does  W.abs() * input_activation_norms per entry:
-        #print(W.shape,'111',self.inp1.shape)
         inp_reshaped = self.inp1.squeeze(0)  # 从 [1, 2048, 768] 变成 [2048, 768]
         wanda_matrix = inp_reshaped @ W.T  # [2048, 768] @ [768, 768]
 
         pruned_W = W.clone()
-        #print(wanda_matrix.shape, W.shape)
         # -----------------------------------------------
         # 4a. Row pruning by Wanda Score
         # -----------------------------------------------
@@ -448,13 +465,11 @@ class SparseGPT_OPT:
             # so effectively it's sum_i(|W[i,j]|) * input_activation_norms[j],
             # but we can just sum across rows from wanda_matrix.
             wanda_col_importance = wanda_matrix.sum(dim=0).abs()  # shape [num_cols]
-            #print(wanda_col_importance.shape)
             # How many columns to prune?
             num_cols_to_prune = int(num_cols * sparsity)
             # Sort columns by importance (ascending)
             sorted_col_indices = torch.argsort(wanda_col_importance)
             cols_to_prune = sorted_col_indices[:num_cols_to_prune]
-            #print(cols_to_prune)
             # Zero out the pruned columns
             pruned_W[cols_to_prune, :] = 0
             print(f"[NIPE] Pruning completed: pruned {num_cols_to_prune} columns (out of {num_cols}).")
@@ -599,12 +614,9 @@ class SparseGPT_OPT:
         
         with torch.no_grad():
             if isinstance(self.layer, nn.Linear):
-                in_features = self.layer.weight.shape[1]
                 X = self.inp1.unsqueeze(0)
-                #print(X.dtype, self.orig_weight.dtype, self.layer.bias.dtype)
                 target = F.linear(X, self.orig_weight.to(self.layer.weight.dtype).to(dev), self.layer.bias)
             elif isinstance(self.layer, nn.Conv2d):
-                in_channels = self.layer.weight.shape[1]
                 X = self.inp1.unsqueeze(0)
                 # Temporarily swap back the original weight to get the target
                 current_weight = self.layer.weight.detach().clone()
@@ -636,7 +648,6 @@ class SparseGPT_OPT:
                 optimizer.zero_grad()
                 # Masked effective weight
                 effective_weight = trainable_weight * self.layer.prune_mask.float().to(trainable_weight.dtype).to(trainable_weight.device)
-                #print(effective_weight.requires_grad, self.layer.bias.requires_grad)
                 if isinstance(self.layer, nn.Linear):
                     output = F.linear(X, effective_weight, self.layer.bias)
                 else:  # Conv2d
@@ -654,11 +665,8 @@ class SparseGPT_OPT:
                 loss.backward()
                 # grad = trainable_weight.grad
                 # if grad is not None:
-                #     print("grad min=%.6f, max=%.6f"%(grad.min(), grad.max()))
-                # print("weight min=%.6f, max=%.6f"%(trainable_weight.data.min(), trainable_weight.data.max()))
 
                 optimizer.step()
-                    #print(output,target)
                     
                 
                 print(f"Iterative correction step {i+1}/{num_iter}, MSE loss: {loss.item():.6f}")
@@ -1019,12 +1027,9 @@ class SparseGPT_OPT:
         
         with torch.no_grad():
             if isinstance(self.layer, nn.Linear):
-                in_features = self.layer.weight.shape[1]
                 X = self.inp1.unsqueeze(0)
-                #print(X.dtype, self.orig_weight.dtype, self.layer.bias.dtype)
                 target = F.linear(X, self.orig_weight.to(self.layer.weight.dtype).to(dev), self.layer.bias)
             elif isinstance(self.layer, nn.Conv2d):
-                in_channels = self.layer.weight.shape[1]
                 X = self.inp1.unsqueeze(0)
                 # Temporarily swap back the original weight to get the target
                 current_weight = self.layer.weight.detach().clone()
@@ -1056,7 +1061,6 @@ class SparseGPT_OPT:
                 optimizer.zero_grad()
                 # Masked effective weight
                 effective_weight = trainable_weight * self.layer.prune_mask.float().to(trainable_weight.dtype).to(trainable_weight.device)
-                #print(effective_weight.requires_grad, self.layer.bias.requires_grad)
                 if isinstance(self.layer, nn.Linear):
                     output = F.linear(X, effective_weight, self.layer.bias)
                 else:  # Conv2d
@@ -1074,11 +1078,8 @@ class SparseGPT_OPT:
                 loss.backward()
                 # grad = trainable_weight.grad
                 # if grad is not None:
-                #     print("grad min=%.6f, max=%.6f"%(grad.min(), grad.max()))
-                # print("weight min=%.6f, max=%.6f"%(trainable_weight.data.min(), trainable_weight.data.max()))
 
                 optimizer.step()
-                    #print(output,target)
                     
                 
                 print(f"Iterative correction step {i+1}/{num_iter}, MSE loss: {loss.item():.6f}")
@@ -1181,9 +1182,8 @@ class SparseGPT_OPT:
 
 
     def free(self):
-        if DEBUG:
-            self.inp1 = None
-            self.out1 = None
+        self.inp1 = None
+        self.out1 = None
         self.H = None
         torch.cuda.empty_cache()
 
@@ -1208,12 +1208,11 @@ class SparseGPT_LlaMA:
         self.batch_out = []
 
     def add_batch(self, inp, out, name, blocksize=1024):
-        if DEBUG:
-            self.inp1 = inp
-            self.out1 = out
+        self.inp1 = inp
+        self.out1 = out
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
-        ###### added code
+        # Retain MLP activations used by the joint structured update.
         if name == 'mlp.up_proj' or name == 'mlp.down_proj':
             self.batch_inp.append(inp[0].clone().detach())
             if len(out.shape) == 3:
@@ -1223,7 +1222,6 @@ class SparseGPT_LlaMA:
             if len(out.shape) == 3:
                 out = out.squeeze(0)
             self.batch_out.append(out.clone().detach())
-        ######
         tmp = inp.shape[0]
         if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
             if len(inp.shape) == 3:
@@ -1237,6 +1235,7 @@ class SparseGPT_LlaMA:
     def fasterprune(
         self, sparsity, prunen=0, prunem=0, blocksize=128, percdamp=.01
     ):
+        _validate_pruning_args(sparsity, prunen, prunem)
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
@@ -1283,8 +1282,7 @@ class SparseGPT_LlaMA:
                     mask1 = mask[:, i1:i2]
                 else:
                     tmp = W1 ** 2 / (torch.diag(Hinv1).reshape((1, -1))) ** 2
-                    thresh = torch.sort(tmp.flatten())[0][int(tmp.numel() * sparsity)]
-                    mask1 = tmp <= thresh
+                    mask1 = _smallest_mask(tmp, sparsity)
             else:
                 mask1 = torch.zeros_like(W1) == 1
 
@@ -1294,7 +1292,8 @@ class SparseGPT_LlaMA:
 
                 if prunen != 0 and i % prunem == 0:
                     tmp = W1[:, i:(i + prunem)] ** 2 / (torch.diag(Hinv1)[i:(i + prunem)].reshape((1, -1))) ** 2
-                    mask1.scatter_(1, i + torch.topk(tmp, prunen, dim=1, largest=False)[1], True)
+                    group_n = min(prunen, tmp.shape[1])
+                    mask1.scatter_(1, i + torch.topk(tmp, group_n, dim=1, largest=False)[1], True)
 
                 q = w.clone()
                 q[mask1[:, i]] = 0
@@ -1316,21 +1315,15 @@ class SparseGPT_LlaMA:
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-            # if DEBUG:
-            #     self.layer.weight.data[:, :i2] = W[:, :i2]
-            #     self.layer.weight.data[:, i2:] = W[:, i2:]
-            #     print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-            #     print(torch.sum(Losses))
 
-        torch.cuda.synchronize()
+        if self.dev.type == "cuda":
+            torch.cuda.synchronize(self.dev)
         print('time %.2f' % (time.time() - tick))
         print('error', torch.sum(Losses).item())
 
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
         self.layer.weight.data = W.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
-        # if DEBUG:
-            # print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
     def simple_structured_prune(self, sparsity, prunen=0, prunem=0, percdamp=128, blocksize=0.01,prune_rows=False, prune_cols=True):
         """
         Performs simple structured pruning on the current layer's weights by removing entire rows 
@@ -1583,12 +1576,10 @@ class SparseGPT_LlaMA:
         # -------------------------------------------------------------------------
         # Expand input_activation_norms to broadcast: shape [1, num_cols].
         # This line effectively does  W.abs() * input_activation_norms per entry:
-        #print(W.shape,'111',self.inp1.shape)
         inp_reshaped = self.inp1.squeeze(0)  # 从 [1, 2048, 768] 变成 [2048, 768]
         wanda_matrix = inp_reshaped @ W.T  # [2048, 768] @ [768, 768]
 
         pruned_W = W.clone()
-        #print(wanda_matrix.shape, W.shape)
         # -----------------------------------------------
         # 4a. Row pruning by Wanda Score
         # -----------------------------------------------
@@ -1614,13 +1605,11 @@ class SparseGPT_LlaMA:
             # so effectively it's sum_i(|W[i,j]|) * input_activation_norms[j],
             # but we can just sum across rows from wanda_matrix.
             wanda_col_importance = wanda_matrix.sum(dim=0).abs()  # shape [num_cols]
-            #print(wanda_col_importance.shape)
             # How many columns to prune?
             num_cols_to_prune = int(num_cols * sparsity)
             # Sort columns by importance (ascending)
             sorted_col_indices = torch.argsort(wanda_col_importance)
             cols_to_prune = sorted_col_indices[:num_cols_to_prune]
-            #print(cols_to_prune)
             # Zero out the pruned columns
             pruned_W[cols_to_prune, :] = 0
             print(f"[NIPE] Pruning completed: pruned {num_cols_to_prune} columns (out of {num_cols}).")
@@ -1765,12 +1754,9 @@ class SparseGPT_LlaMA:
         
         with torch.no_grad():
             if isinstance(self.layer, nn.Linear):
-                in_features = self.layer.weight.shape[1]
                 X = self.inp1.unsqueeze(0)
-                #print(X.dtype, self.orig_weight.dtype, self.layer.bias.dtype)
                 target = F.linear(X, self.orig_weight.to(self.layer.weight.dtype).to(dev), self.layer.bias)
             elif isinstance(self.layer, nn.Conv2d):
-                in_channels = self.layer.weight.shape[1]
                 X = self.inp1.unsqueeze(0)
                 # Temporarily swap back the original weight to get the target
                 current_weight = self.layer.weight.detach().clone()
@@ -1802,7 +1788,6 @@ class SparseGPT_LlaMA:
                 optimizer.zero_grad()
                 # Masked effective weight
                 effective_weight = trainable_weight * self.layer.prune_mask.float().to(trainable_weight.dtype).to(trainable_weight.device)
-                #print(effective_weight.requires_grad, self.layer.bias.requires_grad)
                 if isinstance(self.layer, nn.Linear):
                     output = F.linear(X, effective_weight, self.layer.bias)
                 else:  # Conv2d
@@ -1820,11 +1805,8 @@ class SparseGPT_LlaMA:
                 loss.backward()
                 # grad = trainable_weight.grad
                 # if grad is not None:
-                #     print("grad min=%.6f, max=%.6f"%(grad.min(), grad.max()))
-                # print("weight min=%.6f, max=%.6f"%(trainable_weight.data.min(), trainable_weight.data.max()))
 
                 optimizer.step()
-                    #print(output,target)
                     
                 
                 print(f"Iterative correction step {i+1}/{num_iter}, MSE loss: {loss.item():.6f}")
@@ -2185,12 +2167,9 @@ class SparseGPT_LlaMA:
         
         with torch.no_grad():
             if isinstance(self.layer, nn.Linear):
-                in_features = self.layer.weight.shape[1]
                 X = self.inp1.unsqueeze(0)
-                #print(X.dtype, self.orig_weight.dtype, self.layer.bias.dtype)
                 target = F.linear(X, self.orig_weight.to(self.layer.weight.dtype).to(dev), self.layer.bias)
             elif isinstance(self.layer, nn.Conv2d):
-                in_channels = self.layer.weight.shape[1]
                 X = self.inp1.unsqueeze(0)
                 # Temporarily swap back the original weight to get the target
                 current_weight = self.layer.weight.detach().clone()
@@ -2222,7 +2201,6 @@ class SparseGPT_LlaMA:
                 optimizer.zero_grad()
                 # Masked effective weight
                 effective_weight = trainable_weight * self.layer.prune_mask.float().to(trainable_weight.dtype).to(trainable_weight.device)
-                #print(effective_weight.requires_grad, self.layer.bias.requires_grad)
                 if isinstance(self.layer, nn.Linear):
                     output = F.linear(X, effective_weight, self.layer.bias)
                 else:  # Conv2d
@@ -2240,11 +2218,8 @@ class SparseGPT_LlaMA:
                 loss.backward()
                 # grad = trainable_weight.grad
                 # if grad is not None:
-                #     print("grad min=%.6f, max=%.6f"%(grad.min(), grad.max()))
-                # print("weight min=%.6f, max=%.6f"%(trainable_weight.data.min(), trainable_weight.data.max()))
 
                 optimizer.step()
-                    #print(output,target)
                     
                 
                 print(f"Iterative correction step {i+1}/{num_iter}, MSE loss: {loss.item():.6f}")
@@ -2345,8 +2320,7 @@ class SparseGPT_LlaMA:
         
         
     def free(self):
-        if DEBUG:
-            self.inp1 = None
-            self.out1 = None
+        self.inp1 = None
+        self.out1 = None
         self.H = None
         torch.cuda.empty_cache()

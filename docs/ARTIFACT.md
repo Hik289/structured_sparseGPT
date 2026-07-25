@@ -9,17 +9,16 @@ Operational notes for reproducing `StructPrune` from the public `structured_spar
 
 ## Environment Files
 
-- No dependency manifest is tracked; follow the README install commands and imported packages in the main entry-point scripts.
+- Install the tracked dependency manifest with `pip install -r requirements.txt`.
 
 ## Smoke Checks
 
 Run these checks before long jobs:
 
 ```bash
+python -m unittest discover -s tests -v
 python -m compileall -q .
 ```
-
-If no smoke command is tracked, use the README Quick Start with the smallest seed, sample, or task count.
 
 ## Reproduction Entry Points
 

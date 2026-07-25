@@ -24,20 +24,28 @@ def main():
     parser.add_argument('--invert', action='store_true', help='Invert subset.')
     parser.add_argument('--save', type=str, default='', help='Path to saved model.')
     parser.add_argument('--log_wandb', action='store_true', help='Whether to log to wandb.')
-    parser.add_argument("--cudan", type=str, default='cuda:0', help="cuda to use")
+    parser.add_argument(
+        "--device", "--cudan", dest="device", default="cuda:0",
+        help="PyTorch device; --cudan remains as a compatibility alias.",
+    )
 
     args = parser.parse_args()
+    if not 0 <= args.sparsity <= 1:
+        parser.error("--sparsity must be in [0, 1]")
+    if args.prunen and (not args.prunem or args.prunen > args.prunem):
+        parser.error("N:M pruning requires 0 < --prunen <= --prunem")
+    device = torch.device(args.device)
 
     model = get_opt(args)
     model.eval()
     dataloader, testloader = get_loaders(args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen)
 
     if (args.sparsity or args.prunen) and not args.gmp:
-        opt_sparsellm(model, dataloader, torch.device(args.cudan), args)
+        opt_sparsellm(model, dataloader, device, args)
 
     for dataset in ['wikitext2', 'c4']:
         dataloader, testloader = get_loaders(dataset, seed=args.seed, model=args.model, seqlen=model.seqlen)
-        opt_eval(model, testloader, torch.device(args.cudan), args, dataset)
+        opt_eval(model, testloader, device, args, dataset)
 
     if args.save:
         model.save_pretrained(args.save)

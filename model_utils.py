@@ -1,30 +1,49 @@
-# This file will contain functions related to the model such as loading the model, SparseLLM pruning, and evaluation.
+"""Model loading, layer-wise pruning, and perplexity evaluation."""
 
 import torch
 import torch.nn as nn
-from pruning_utils import *
-from quant import *
+import transformers
 import math
 import copy
 from transformers import OPTForCausalLM, LlamaForCausalLM
 
-def get_opt(args):
+from pruning_utils import (
+    _smallest_mask,
+    find_layers,
+    SparseGPT_LlaMA,
+    SparseGPT_OPT,
+)
+from quant import Quantizer
+
+
+def _load_without_reinitializing(loader, model_name):
+    """Load a checkpoint without retaining global initializer monkey patches."""
+    initializers = {
+        "kaiming_uniform_": torch.nn.init.kaiming_uniform_,
+        "uniform_": torch.nn.init.uniform_,
+        "normal_": torch.nn.init.normal_,
+    }
+
     def skip(*args, **kwargs):
-        pass
-    torch.nn.init.kaiming_uniform_ = skip
-    torch.nn.init.uniform_ = skip
-    torch.nn.init.normal_ = skip
-    model = OPTForCausalLM.from_pretrained(args.model, torch_dtype='auto')
+        return args[0] if args else None
+
+    try:
+        for name in initializers:
+            setattr(torch.nn.init, name, skip)
+        return loader.from_pretrained(model_name, torch_dtype="auto")
+    finally:
+        for name, initializer in initializers.items():
+            setattr(torch.nn.init, name, initializer)
+
+
+def get_opt(args):
+    model = _load_without_reinitializing(OPTForCausalLM, args.model)
     model.seqlen = model.config.max_position_embeddings
     return model
 
+
 def get_llama(args):
-    def skip(*args, **kwargs):
-        pass
-    torch.nn.init.kaiming_uniform_ = skip
-    torch.nn.init.uniform_ = skip
-    torch.nn.init.normal_ = skip
-    model = LlamaForCausalLM.from_pretrained(args.model, torch_dtype='auto')
+    model = _load_without_reinitializing(LlamaForCausalLM, args.model)
     model.seqlen = 2048
     return model
 
@@ -110,17 +129,40 @@ def opt_sparsellm(model, dataloader, dev, args):
             h.remove()
 
         target_layer_names = ['fc1', 'fc2']
-#sxysxy
         for name in gpts:
             if name not in target_layer_names:   
                 print(i, name)
                 print('Pruning ...')
                 # Prune the layer
                 sparsity = args.sparsity
-                gpts[name].faster_prune(
+                gpts[name].fasterprune(
                     sparsity, prunen=args.prunen, prunem=args.prunem, percdamp=args.percdamp, blocksize=args.blocksize
                 )
                 gpts[name].free()
+
+        if not all(name in gpts for name in target_layer_names):
+            # A restricted layer selection cannot run the joint MLP update.
+            # Prune any selected MLP projection independently instead.
+            for name in target_layer_names:
+                if name in gpts:
+                    gpts[name].fasterprune(
+                        args.sparsity,
+                        prunen=args.prunen,
+                        prunem=args.prunem,
+                        percdamp=args.percdamp,
+                        blocksize=args.blocksize,
+                    )
+                    gpts[name].free()
+            for j in range(args.nsamples):
+                outs[j] = layer(
+                    inps[j].unsqueeze(0),
+                    attention_mask=attention_mask,
+                )[0]
+            layers[i] = layer.cpu()
+            del layer
+            torch.cuda.empty_cache()
+            inps, outs = outs, inps
+            continue
 
         # Adjust hyperparameters as needed
         alpha = 0.1
@@ -220,7 +262,6 @@ def opt_sparsellm(model, dataloader, dev, args):
                 gpts['fc2'].H.copy_(tmp_H)
                 del tmp_H, tmp_p
                 torch.cuda.empty_cache()
-#sxysxy
             for name in target_layer_names:
                 print(i, name)
                 print('Pruning ...')
@@ -271,8 +312,8 @@ def opt_sparsellm(model, dataloader, dev, args):
             z1 = torch.zeros_like(p)
             z2 = torch.zeros_like(p)
 
-            chunk_size = 500  # Choose an appropriate size based on your memory constraints
-            # Assuming the first dimension is the one to be chunked
+            # Bound peak memory while solving the element-wise ReLU update.
+            chunk_size = 500
             for k in range(0, sol1.size(0), chunk_size):
                 chunk = slice(k, k + chunk_size)
                 
@@ -334,7 +375,8 @@ def llama_sparsellm(model, dataloader, dev, args):
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
     model.model.norm = model.model.norm.to(dev)
-    model.model.rotary_emb   = model.model.rotary_emb.to(dev)  # crucial fix
+    # Rotary embeddings are reused for every layer and must remain on ``dev``.
+    model.model.rotary_emb = model.model.rotary_emb.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -362,10 +404,9 @@ def llama_sparsellm(model, dataloader, dev, args):
             pass
     layers[0] = layers[0].module
 
-    layers[0]                = layers[0].cpu()
-    # model.model.embed_tokens = model.model.embed_tokens.cpu()
-    # model.model.norm         = model.model.norm.cpu()
-    # model.model.rotary_emb   = model.model.rotary_emb.cpu()
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -381,8 +422,7 @@ def llama_sparsellm(model, dataloader, dev, args):
             sequential = [
                 ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
                 ["self_attn.o_proj"],
-                ["mlp.up_proj", "mlp.gate_proj"],
-                ["mlp.down_proj"],
+                ["mlp.up_proj", "mlp.gate_proj", "mlp.down_proj"],
             ]
         else:
             sequential = [list(full.keys())]
@@ -403,15 +443,19 @@ def llama_sparsellm(model, dataloader, dev, args):
                         args.wbits, perchannel=True, sym=False, mse=False
                     )
 
-            def add_batch(name):
+            def add_batch(name, pruner):
                 def tmp(_, inp, out):
-                    gpts[name].add_batch(inp[0].data, out.data, name)
+                    pruner.add_batch(inp[0].data, out.data, name)
 
                 return tmp
 
             handles = []
-            for name in subset:
-                handles.append(subset[name].register_forward_hook(add_batch(name)))
+            for name in gpts:
+                handles.append(
+                    subset[name].register_forward_hook(
+                        add_batch(name, gpts[name])
+                    )
+                )
             for j in range(args.nsamples):
                 # e.g. hidden_states: (1, seq_len, hidden_size)
                 hidden_states = inps[j].unsqueeze(0).to(dev)
@@ -431,13 +475,9 @@ def llama_sparsellm(model, dataloader, dev, args):
                 )[0]
             for h in handles:
                 h.remove()
-            model.model.embed_tokens = model.model.embed_tokens.cpu()
-            model.model.norm         = model.model.norm.cpu()
-            model.model.rotary_emb   = model.model.rotary_emb.cpu()
             target_layer_names = ["mlp.up_proj", "mlp.gate_proj", "mlp.down_proj"]
-#sxysxy
             for name in subset:
-                if name not in target_layer_names:   
+                if name in gpts and name not in target_layer_names:
                     print(i, name)
                     print("Pruning ...")
                     sparsity = args.sparsity
@@ -450,13 +490,28 @@ def llama_sparsellm(model, dataloader, dev, args):
                     )
                     gpts[name].free()
 
+            if not all(name in gpts for name in target_layer_names):
+                # Attention groups and restricted MLP selections use ordinary
+                # SparseGPT; the joint update requires all three projections.
+                for name in target_layer_names:
+                    if name in gpts:
+                        gpts[name].fasterprune(
+                            args.sparsity,
+                            prunen=args.prunen,
+                            prunem=args.prunem,
+                            percdamp=args.percdamp,
+                            blocksize=args.blocksize,
+                        )
+                        gpts[name].free()
+                continue
+
             # Adjust hyperparameters as needed
             alpha = 5.0
             beta = 5.0
             gamma = 5.0
 
-            # Define the number of global pruning epochs
-            opt_epochs = 8  # This might need to be adjusted
+            # Number of global alternating-update iterations.
+            opt_epochs = 8
 
             # Get the inputs and outputs which are constants here
             X_list = gpts['mlp.up_proj'].batch_inp
@@ -557,7 +612,6 @@ def llama_sparsellm(model, dataloader, dev, args):
                     gpts['mlp.down_proj'].H.copy_(tmp_H)
                     del tmp_H, tmp_p
                     torch.cuda.empty_cache()
-#sxysxy
                 for name in target_layer_names:
                     print(i, name)
                     print('Pruning ...')
@@ -620,7 +674,8 @@ def llama_sparsellm(model, dataloader, dev, args):
                 s_learning_rate = 0.01
                 for _ in range(s_update_epochs):
 
-                    batch_size = 1000  # Choose an appropriate batch size based on your memory constraints
+                    # Chunk the auxiliary-state update to bound peak memory.
+                    batch_size = 1000
                     # s: [hidden_d, n_samples]
                     for k in range(0, s.size(-1), batch_size):
                         chunk = slice(k, k + batch_size)
@@ -678,6 +733,7 @@ def llama_sparsellm(model, dataloader, dev, args):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    model.model.rotary_emb = model.model.rotary_emb.cpu()
 
 
 @torch.no_grad()
@@ -743,8 +799,7 @@ def opt_eval(model, testenc, dev, args, dataset: str):
             subset = find_layers(layer)
             for name in subset:
                 W = subset[name].weight.data
-                thresh = torch.sort(torch.abs(W.flatten()))[0][int(W.numel() * args.sparsity)]
-                W.data[torch.abs(W.data) <= thresh] = 0
+                W.data[_smallest_mask(torch.abs(W), args.sparsity)] = 0
 
         for j in range(nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
@@ -837,10 +892,7 @@ def llama_eval(model, testenc, dev, args, dataset: str):
             subset = find_layers(layer)
             for name in subset:
                 W = subset[name].weight.data
-                thresh = torch.sort(torch.abs(W.flatten()))[0][
-                    int(W.numel() * args.sparsity)
-                ]
-                W.data[torch.abs(W.data) <= thresh] = 0
+                W.data[_smallest_mask(torch.abs(W), args.sparsity)] = 0
 
         for j in range(nsamples):
             # (seq_len, hidden_size)
@@ -890,6 +942,8 @@ def llama_eval(model, testenc, dev, args, dataset: str):
     # 收尾：把 norm、lm_head 移回 CPU（如果想释放显存）
     if model.model.norm is not None:
         model.model.norm = model.model.norm.cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.rotary_emb = model.model.rotary_emb.cpu()
     model.lm_head = model.lm_head.cpu()
 
     model.config.use_cache = use_cache
