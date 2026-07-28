@@ -24,11 +24,15 @@ Official implementation for the arXiv paper:
 
 </div>
 
-## Repository Summary
+## At A Glance
 
-- **Scope.** Can structured global pruning be made memory-efficient enough for large autoregressive models?
-- **Method.** StructPrune implements global structured pruning with asymptotic GPU memory scaling of O(sqrt(N)).
-- **Contents.** OPT and LLaMA entrypoints, calibration-dataset options, pruning arguments, saving workflows, and implementation notes.
+| Artifact review question | Entry point |
+| --- | --- |
+| Research question | Can structured global pruning be made memory-efficient enough for large autoregressive models? |
+| Core method | StructPrune implements global structured pruning with asymptotic GPU memory scaling of O(sqrt(N)). |
+| Included artifacts | OPT and LLaMA entrypoints, calibration-dataset options, pruning arguments, saving workflows, and implementation notes. |
+| Fast validation | `python -m unittest discover -s tests -v` |
+| Paper-scale reproduction | OPT/LLaMA pruning and evaluation entry points with calibration data. |
 
 ## Overview
 
